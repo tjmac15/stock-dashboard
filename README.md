@@ -29,7 +29,7 @@ pip install -r requirements.txt
    (keep it to ~5 tickers so it stays fast and readable):
 
    ```python
-   WATCHLIST = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
+   WATCHLIST = ["KO", "WFC", "MRK", "CSCO", "XOM"]
    ```
 
 2. Run it:
