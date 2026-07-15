@@ -54,6 +54,21 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 OUTPUT_FILE = "dashboard.html"
 CURRENCY_SYMBOL = "$"
+
+# Optional: Google sign-in + cloud sync for your buy price/qty entries, so
+# they survive across devices and browser data clears instead of relying on
+# browser local storage. Leave these as-is to skip cloud sync (the dashboard
+# still works fine — entries just stay local-only). To enable it, create a
+# free Firebase project (see README.md for exact steps) and paste your web
+# app's config values in below.
+FIREBASE_CONFIG = {
+    "apiKey": "YOUR_API_KEY",
+    "authDomain": "YOUR_PROJECT_ID.firebaseapp.com",
+    "projectId": "YOUR_PROJECT_ID",
+    "storageBucket": "YOUR_PROJECT_ID.appspot.com",
+    "messagingSenderId": "YOUR_SENDER_ID",
+    "appId": "YOUR_APP_ID",
+}
 # ---------------------------------------------------------------------------
 
 
@@ -209,8 +224,17 @@ def build_chart_html(ticker: str, df: pd.DataFrame) -> str:
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", y=1.08),
         template="plotly_white",
+        dragmode="pan",   # dragging pans the chart by default (no more accidental box/lasso select)
     )
-    return fig.to_html(full_html=False, include_plotlyjs=False)
+    return fig.to_html(
+        full_html=False,
+        include_plotlyjs=False,
+        config={
+            "scrollZoom": True,                          # mouse wheel / trackpad pinch zooms in and out
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"],  # these caused the "stuck lasso" issue — removed entirely
+            "displaylogo": False,
+        },
+    )
 
 
 def build_dashboard(results: list[dict]) -> str:
@@ -245,8 +269,8 @@ def build_dashboard(results: list[dict]) -> str:
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Current close prices, passed to JS so P/L can be computed client-side
     current_prices_js = "{" + ", ".join(f'"{r["ticker"]}": {r["close"]}' for r in results) + "}"
+    firebase_config_js = "{" + ", ".join(f'"{k}": "{v}"' for k, v in FIREBASE_CONFIG.items()) + "}"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -254,6 +278,9 @@ def build_dashboard(results: list[dict]) -> str:
 <meta charset="UTF-8">
 <title>Stock Signal Dashboard</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <style>
   body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
          background:#f5f6f8; margin:0; padding:24px; color:#1a1a1a; }}
@@ -271,11 +298,22 @@ def build_dashboard(results: list[dict]) -> str:
   .qty-input {{ width:70px; }}
   .position-note {{ margin-top:12px; padding:12px 16px; background:#eef4ff; border-left:4px solid #3b82f6;
                     font-size:0.82em; color:#444; border-radius:4px; }}
+  .auth-bar {{ display:flex; align-items:center; gap:12px; margin-bottom:16px; }}
+  .auth-btn {{ padding:8px 16px; border-radius:6px; border:1px solid #ddd; background:white;
+              cursor:pointer; font-size:0.9em; font-weight:600; }}
+  .auth-btn:hover {{ background:#f5f5f5; }}
+  #userLabel {{ font-size:0.85em; color:#555; }}
 </style>
 </head>
 <body>
   <h1>📊 Daily Stock Signal Dashboard</h1>
   <div class="timestamp">Generated {now}</div>
+
+  <div class="auth-bar">
+    <button id="signInBtn" class="auth-btn" onclick="signIn()" style="display:none;">Sign in with Google to sync across devices</button>
+    <button id="signOutBtn" class="auth-btn" onclick="signOutUser()" style="display:none;">Sign out</button>
+    <span id="userLabel"></span>
+  </div>
 
   <table>
     <tr>
@@ -285,11 +323,10 @@ def build_dashboard(results: list[dict]) -> str:
     {summary_rows}
   </table>
 
-  <div class="position-note">
-    Enter your buy price (and optionally quantity) for any stock to see your
-    gain/loss update automatically. This is saved only in your own browser
-    (not uploaded anywhere) and will still be here the next time this page
-    refreshes — clearing your browser data will clear it too.
+  <div class="position-note" id="positionNote">
+    Enter your buy price when you buy (and optionally quantity) — leave it
+    blank to clear it when you sell. Currently saved only in this browser;
+    sign in with Google above to sync across devices instead.
   </div>
 
   {chart_sections}
@@ -304,8 +341,36 @@ def build_dashboard(results: list[dict]) -> str:
   <script>
     const currentPrices = {current_prices_js};
     const currencySymbol = "{CURRENCY_SYMBOL}";
+    const firebaseConfig = {firebase_config_js};
 
-    function updatePL(ticker) {{
+    let currentUser = null;
+    let userPositionsRef = null;
+    let firebaseReady = false;
+
+    // Only actually initialize Firebase if the config has been filled in —
+    // otherwise silently fall back to local-only storage so the page never breaks.
+    try {{
+      if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "YOUR_API_KEY") {{
+        firebase.initializeApp(firebaseConfig);
+        firebaseReady = true;
+      }}
+    }} catch (e) {{
+      console.warn("Firebase not configured — using local browser storage only.", e);
+    }}
+
+    function signIn() {{
+      const provider = new firebase.auth.GoogleAuthProvider();
+      firebase.auth().signInWithPopup(provider).catch(function(err) {{
+        alert("Sign-in failed: " + err.message);
+      }});
+    }}
+
+    function signOutUser() {{
+      firebase.auth().signOut();
+    }}
+
+    function updatePL(ticker, shouldSave) {{
+      if (shouldSave === undefined) shouldSave = true;
       const buyInput = document.getElementById('buy_' + ticker);
       const qtyInput = document.getElementById('qty_' + ticker);
       const plCell = document.getElementById('pl_' + ticker);
@@ -315,8 +380,7 @@ def build_dashboard(results: list[dict]) -> str:
 
       if (!buy || buy <= 0) {{
         plCell.innerHTML = '<span style="color:#999;">—</span>';
-        localStorage.removeItem('buyPrice_' + ticker);
-        localStorage.removeItem('qty_' + ticker);
+        if (shouldSave) clearPosition(ticker);
         return;
       }}
 
@@ -335,21 +399,90 @@ def build_dashboard(results: list[dict]) -> str:
       }}
 
       plCell.innerHTML = html;
-
-      localStorage.setItem('buyPrice_' + ticker, buyInput.value);
-      localStorage.setItem('qty_' + ticker, qtyInput.value);
+      if (shouldSave) savePosition(ticker, buyInput.value, qtyInput.value);
     }}
 
-    function loadPosition(ticker) {{
+    function savePosition(ticker, buy, qty) {{
+      if (currentUser && userPositionsRef) {{
+        const update = {{}};
+        update[ticker] = {{ buy: buy, qty: qty }};
+        userPositionsRef.set(update, {{ merge: true }}).catch(function(err) {{
+          console.error("Cloud save failed, falling back to local storage:", err);
+          localStorage.setItem('buyPrice_' + ticker, buy);
+          localStorage.setItem('qty_' + ticker, qty);
+        }});
+      }} else {{
+        localStorage.setItem('buyPrice_' + ticker, buy);
+        localStorage.setItem('qty_' + ticker, qty);
+      }}
+    }}
+
+    function clearPosition(ticker) {{
+      if (currentUser && userPositionsRef) {{
+        const update = {{}};
+        update[ticker] = firebase.firestore.FieldValue.delete();
+        userPositionsRef.set(update, {{ merge: true }}).catch(function(err) {{
+          console.error("Cloud clear failed:", err);
+        }});
+      }} else {{
+        localStorage.removeItem('buyPrice_' + ticker);
+        localStorage.removeItem('qty_' + ticker);
+      }}
+    }}
+
+    function loadPositionLocal(ticker) {{
       const savedBuy = localStorage.getItem('buyPrice_' + ticker);
       const savedQty = localStorage.getItem('qty_' + ticker);
       if (savedBuy) document.getElementById('buy_' + ticker).value = savedBuy;
       if (savedQty) document.getElementById('qty_' + ticker).value = savedQty;
-      updatePL(ticker);
+      updatePL(ticker, false);
+    }}
+
+    function loadPositionsFromCloud() {{
+      userPositionsRef.get().then(function(doc) {{
+        const data = doc.exists ? doc.data() : {{}};
+        Object.keys(currentPrices).forEach(function(ticker) {{
+          const pos = data[ticker];
+          if (pos) {{
+            document.getElementById('buy_' + ticker).value = pos.buy;
+            document.getElementById('qty_' + ticker).value = pos.qty;
+          }}
+          updatePL(ticker, false);
+        }});
+      }}).catch(function(err) {{
+        console.error("Cloud load failed, falling back to local storage:", err);
+        Object.keys(currentPrices).forEach(loadPositionLocal);
+      }});
     }}
 
     document.addEventListener('DOMContentLoaded', function() {{
-      Object.keys(currentPrices).forEach(loadPosition);
+      if (firebaseReady) {{
+        document.getElementById('signInBtn').style.display = 'inline-block';
+        firebase.auth().onAuthStateChanged(function(user) {{
+          currentUser = user;
+          const signInBtn = document.getElementById('signInBtn');
+          const signOutBtn = document.getElementById('signOutBtn');
+          const userLabel = document.getElementById('userLabel');
+          const note = document.getElementById('positionNote');
+          if (user) {{
+            signInBtn.style.display = 'none';
+            signOutBtn.style.display = 'inline-block';
+            userLabel.textContent = 'Synced as ' + user.displayName;
+            note.textContent = 'Enter your buy price when you buy, and clear it when you sell — synced to your Google account across devices.';
+            userPositionsRef = firebase.firestore().collection('positions').doc(user.uid);
+            loadPositionsFromCloud();
+          }} else {{
+            signInBtn.style.display = 'inline-block';
+            signOutBtn.style.display = 'none';
+            userLabel.textContent = '';
+            note.textContent = 'Enter your buy price when you buy (and optionally quantity) — leave it blank to clear it when you sell. Currently saved only in this browser; sign in with Google above to sync across devices instead.';
+            userPositionsRef = null;
+            Object.keys(currentPrices).forEach(loadPositionLocal);
+          }}
+        }});
+      }} else {{
+        Object.keys(currentPrices).forEach(loadPositionLocal);
+      }}
     }});
   </script>
 </body>
