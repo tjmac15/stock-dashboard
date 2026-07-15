@@ -68,7 +68,7 @@ FIREBASE_CONFIG = {
     storageBucket: "stock-dashboard-12345.appspot.com",
     messagingSenderId: "123456789012",
     appId: "1:123456789012:web:abcdef123456",
-}
+};
 #-----------------------------------------------------------------------
 
 def fetch_data(ticker: str, period: str) -> pd.DataFrame:
