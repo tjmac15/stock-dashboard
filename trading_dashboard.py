@@ -292,7 +292,7 @@ def build_dashboard(results: list[dict]) -> str:
           </div>"""
             ai_html = f"""
         <div class="ai-analysis">
-          <div class="ai-label">Analysis by Gemini AI {r['ticker']}</div>
+          <div class="ai-label">Analysis by Gemini AI on {r['ticker']}</div>
           {ai_text_html}
           {news_html}
           <div class="ai-caveat">AI-generated from the indicators (and fundamentals, where available) above — may be inaccurate, not financial advice. Headlines link to their original source.</div>
