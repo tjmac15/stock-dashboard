@@ -353,7 +353,7 @@ def build_dashboard(results: list[dict]) -> str:
 </style>
 </head>
 <body>
-  <h1>US Stock Signal Dashboard</h1>
+  <h1>US daily Stocks Signal Dashboard</h1>
   <div class="timestamp">Generated {now}</div>
 
   <div class="auth-bar">
